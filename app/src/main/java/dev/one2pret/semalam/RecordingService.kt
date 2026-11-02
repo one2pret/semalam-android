@@ -25,6 +25,11 @@ import java.util.concurrent.atomic.AtomicBoolean
 internal object RecorderStatus {
     @Volatile var isRecording = false
     @Volatile var lastError: String? = null
+    @Volatile var phase: String = "idle"
+    @Volatile var calibrationPercent: Int = 0
+    @Volatile var inputDb: Double? = null
+    @Volatile var detectedEvents: Int = 0
+    @Volatile var savedClips: Int = 0
 }
 
 /** User-initiated foreground service, never started by a bedtime alarm. */
@@ -39,7 +44,13 @@ class RecordingService : Service() {
 
         fun start(context: Context) {
             val intent = Intent(context, RecordingService::class.java).setAction(ACTION_START)
-            ContextCompat.startForegroundService(context, intent)
+            RecorderStatus.phase = "starting"
+            try {
+                ContextCompat.startForegroundService(context, intent)
+            } catch (error: Exception) {
+                RecorderStatus.phase = "idle"
+                throw error
+            }
         }
         fun stop(context: Context) {
             context.startService(Intent(context, RecordingService::class.java).setAction(ACTION_STOP))
@@ -70,6 +81,7 @@ class RecordingService : Service() {
                     RecorderStatus.lastError = "Gagal memulai: ${error.javaClass.simpleName}"
                     running.set(false)
                     RecorderStatus.isRecording = false
+                    RecorderStatus.phase = "idle"
                     releaseResources()
                     stopSelf()
                 }
@@ -105,6 +117,11 @@ class RecordingService : Service() {
         val session = sessionStore.startSession()
         requestedStop = false
         RecorderStatus.lastError = null
+        RecorderStatus.calibrationPercent = 0
+        RecorderStatus.inputDb = null
+        RecorderStatus.detectedEvents = 0
+        RecorderStatus.savedClips = 0
+        RecorderStatus.phase = "calibrating"
         running.set(true)
         RecorderStatus.isRecording = true
         worker = Thread({ captureLoop(localRecorder, sessionStore, session.id) }, "SemalamAudioCapture")
@@ -123,9 +140,12 @@ class RecordingService : Service() {
                 .apply { acquire(MAX_SESSION_MS + 60_000L) }
             audio.startRecording()
             val engine = SoundEventEngine(SAMPLE_RATE) { pcm, offsetMs, durationMs ->
+                RecorderStatus.detectedEvents++
                 if (!clipLimitReached) {
                     val saved = store.addClip(sessionId, pcm, offsetMs, durationMs)
-                    if (!saved) {
+                    if (saved) {
+                        RecorderStatus.savedClips++
+                    } else {
                         clipLimitReached = true
                         RecorderStatus.lastError = "Batas cuplikan atau penyimpanan hampir penuh."
                     }
@@ -144,10 +164,18 @@ class RecordingService : Service() {
                     size > 0 -> {
                         val allZero = (0 until size).all { frame[it] == 0.toShort() }
                         silentReads = if (allZero) silentReads + 1 else 0
-                        if (silentReads == 6000) {
-                            RecorderStatus.lastError = "Mikrofon terlalu lama mengirimkan sampel nol; pastikan tidak dibisukan sistem."
+                        if (silentReads >= 6000) {
+                            status = "interrupted"
+                            message = "Mikrofon mengirim data nol terlalu lama; kemungkinan input dibisukan sistem."
+                            RecorderStatus.lastError = message
+                            break
                         }
                         engine.accept(frame, size)
+                        RecorderStatus.calibrationPercent = engine.calibrationPercent
+                        RecorderStatus.inputDb = engine.lastInputDb
+                        if (engine.isCalibrated && RecorderStatus.phase != "stopping") {
+                            RecorderStatus.phase = "recording"
+                        }
                     }
                     !running.get() -> break
                     else -> {
@@ -176,6 +204,7 @@ class RecordingService : Service() {
         } finally {
             running.set(false)
             RecorderStatus.isRecording = false
+            RecorderStatus.phase = "idle"
             try { store.finish(sessionId, status, message) } catch (_: Exception) { /* recovery on next launch */ }
             releaseResources()
             stopForeground(STOP_FOREGROUND_REMOVE)
@@ -189,6 +218,7 @@ class RecordingService : Service() {
             return
         }
         requestedStop = true
+        RecorderStatus.phase = "stopping"
         running.set(false)
         try { recorder?.stop() } catch (_: Exception) { }
     }

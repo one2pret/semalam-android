@@ -72,6 +72,12 @@ private fun SemalamScreen() {
     var sessions by remember { mutableStateOf(store.list()) }
     var selectedId by remember { mutableStateOf(sessions.firstOrNull()?.id) }
     var recording by remember { mutableStateOf(RecorderStatus.isRecording) }
+    var recordingPhase by remember { mutableStateOf(RecorderStatus.phase) }
+    var calibrationPercent by remember { mutableStateOf(RecorderStatus.calibrationPercent) }
+    var inputDb by remember { mutableStateOf(RecorderStatus.inputDb) }
+    var detectedEvents by remember { mutableStateOf(RecorderStatus.detectedEvents) }
+    var savedClips by remember { mutableStateOf(RecorderStatus.savedClips) }
+    var storage by remember { mutableStateOf(store.storageSummary()) }
     var reminderEnabled by remember { mutableStateOf(BedtimeSchedule.isEnabled(context)) }
     var reminderHour by remember { mutableStateOf(BedtimeSchedule.hour(context)) }
     var reminderMinute by remember { mutableStateOf(BedtimeSchedule.minute(context)) }
@@ -89,6 +95,15 @@ private fun SemalamScreen() {
             selectedId = sessions.firstOrNull()?.id
         }
         recording = RecorderStatus.isRecording
+        recordingPhase = RecorderStatus.phase
+        calibrationPercent = RecorderStatus.calibrationPercent
+        inputDb = RecorderStatus.inputDb
+        detectedEvents = RecorderStatus.detectedEvents
+        savedClips = RecorderStatus.savedClips
+        storage = store.storageSummary()
+        if (recordingPhase != "starting" && recordingPhase != "stopping" &&
+            statusText in listOf("Memulai perekaman…", "Menghentikan dan menyimpan sesi…")
+        ) statusText = ""
     }
 
     fun stopPlayback() {
@@ -128,7 +143,8 @@ private fun SemalamScreen() {
     }
 
     val current = sessions.firstOrNull { it.id == selectedId }
-    val isCurrentRecording = recording && sessions.any { it.status == "recording" }
+    val isCurrentRecording = recordingPhase in setOf("starting", "calibrating", "recording", "stopping") ||
+        (recording && sessions.any { it.status == "recording" })
     val colors = darkColorScheme(
         primary = accent, onPrimary = navy, background = navy,
         surface = navy, surfaceContainer = panel,
@@ -145,13 +161,28 @@ private fun SemalamScreen() {
                 Text("Kenali kejadian suara saat tidur, tanpa mengunggah rekaman ke internet.", color = Color(0xFFBFCBE3))
                 Card(colors = CardDefaults.cardColors(containerColor = panel), modifier = Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        Text(if (isCurrentRecording) "● Sedang merekam" else "Siap untuk malam ini", fontWeight = FontWeight.SemiBold)
+                        Text(when (recordingPhase) {
+                            "starting" -> "● Memulai perekaman"
+                            "calibrating" -> "● Kalibrasi suara kamar"
+                            "recording" -> "● Sedang merekam"
+                            "stopping" -> "● Menghentikan perekaman"
+                            else -> "Siap untuk malam ini"
+                        }, fontWeight = FontWeight.SemiBold)
                         Text(
                             if (isCurrentRecording) "Mikrofon aktif. Layar boleh dikunci. Hentikan ketika bangun."
                             else "Mulai sesi saat siap tidur. Selama 12 detik pertama, aplikasi mengukur kebisingan kamar.",
                             color = Color(0xFFD2DCED)
                         )
-                        if (isCurrentRecording) {
+                        if (recordingPhase == "calibrating") {
+                            Text("Kalibrasi: ${calibrationPercent}% — usahakan kamar tenang selama 12 detik.")
+                        }
+                        if (recordingPhase == "recording") {
+                            Text("Level mikrofon: ${inputDb?.toInt() ?: "—"} dBFS (diagnostik)")
+                            Text("Kejadian: " + detectedEvents + " · Cuplikan disimpan: " + savedClips)
+                        }
+                        if (recordingPhase == "stopping") {
+                            Text("Menyimpan hasil sesi…")
+                        } else if (isCurrentRecording) {
                             Button(onClick = {
                                 RecordingService.stop(context)
                                 statusText = "Menghentikan dan menyimpan sesi…"
@@ -199,6 +230,8 @@ private fun SemalamScreen() {
                 }
                 HorizontalDivider(color = Color(0xFF40506D))
                 Text("Riwayat perekaman", style = MaterialTheme.typography.titleLarge)
+                Text("Penyimpanan lokal: ${formatStorageSize(storage.bytes)} · ${storage.sessions} sesi · ${storage.clips} cuplikan",
+                    style = MaterialTheme.typography.bodySmall, color = Color(0xFFBFCBE3))
                 if (sessions.isEmpty()) {
                     Text("Belum ada sesi. Mulai rekam, tunggu kalibrasi 12 detik, kemudian buat suara beberapa detik untuk uji.", color = Color(0xFFBFCBE3))
                 }
@@ -212,7 +245,7 @@ private fun SemalamScreen() {
                         Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
                             Column(Modifier.weight(1f)) {
                                 Text(formatDate(session.startedMs), fontWeight = FontWeight.SemiBold)
-                                Text("${formatClock(session.startedMs)} · ${session.clips.size} cuplikan · ${session.status}", style = MaterialTheme.typography.bodySmall)
+                                Text("${formatClock(session.startedMs)} · ${session.clips.size} cuplikan · ${sessionStatusLabel(session.status)}", style = MaterialTheme.typography.bodySmall)
                             }
                             if (selected) Text("✓", color = accent)
                         }
@@ -222,12 +255,13 @@ private fun SemalamScreen() {
                     HorizontalDivider(color = Color(0xFF40506D))
                     Text("Detail sesi", style = MaterialTheme.typography.titleLarge)
                     Text("Mulai: ${formatClock(current.startedMs)} · Durasi sesi: ${formatDuration((current.finishedMs ?: System.currentTimeMillis()) - current.startedMs)}")
-                    Text("Status: ${current.status}", color = Color(0xFFBBC8E0))
+                    Text("Status: ${sessionStatusLabel(current.status)}", color = Color(0xFFBBC8E0))
                     if (current.message.isNotEmpty()) Text("Catatan: ${current.message}", color = Color(0xFFFFD8A0))
                     if (current.clips.isEmpty()) Text("Belum ada suara yang melewati ambang deteksi. Hasil kosong bukan berarti tidur tanpa gangguan.")
                     current.clips.forEach { clip ->
                         ClipCard(
                             session = current, clip = clip, isPlaying = playingClip == clip.id,
+                            editable = current.status != "recording",
                             onPlay = {
                                 if (playingClip == clip.id) stopPlayback() else {
                                     stopPlayback()
@@ -245,7 +279,12 @@ private fun SemalamScreen() {
                                 }
                             },
                             onLabel = { label -> store.updateLabel(current.id, clip.id, label); refresh() },
-                            onDelete = { stopPlayback(); store.removeClip(current.id, clip.id); refresh() },
+                            onDelete = {
+                                stopPlayback()
+                                statusText = if (store.removeClip(current.id, clip.id)) "Cuplikan dan file audio telah dihapus."
+                                else "Penghapusan gagal. File mungkin masih ada; coba kembali setelah sesi berhenti."
+                                refresh()
+                            },
                         )
                     }
                     if (current.status != "recording") {
@@ -268,7 +307,8 @@ private fun SemalamScreen() {
                 text = { Text("Seluruh cuplikan audio sesi ini akan dihapus dari perangkat. Tindakan tidak bisa dibatalkan.") },
                 confirmButton = { TextButton(onClick = {
                     stopPlayback()
-                    store.removeSession(current.id)
+                    statusText = if (store.removeSession(current.id)) "Sesi dan semua file audio dihapus."
+                    else "Penghapusan sesi gagal; periksa penyimpanan perangkat."
                     showDeleteSession = false
                     refresh()
                 }) { Text("Hapus permanen") } },
@@ -283,6 +323,7 @@ private fun ClipCard(
     session: SleepSession,
     clip: SoundClip,
     isPlaying: Boolean,
+    editable: Boolean,
     onPlay: () -> Unit,
     onLabel: (String) -> Unit,
     onDelete: () -> Unit,
@@ -295,14 +336,14 @@ private fun ClipCard(
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 OutlinedButton(onClick = onPlay) { Text(if (isPlaying) "■ Stop" else "▶ Putar") }
                 androidx.compose.foundation.layout.Box {
-                    TextButton(onClick = { showLabels = true }) { Text("Label") }
+                    TextButton(onClick = { showLabels = true }, enabled = editable) { Text("Label") }
                     DropdownMenu(expanded = showLabels, onDismissRequest = { showLabels = false }) {
                         listOf("Mirip dengkuran", "Mirip berbicara", "Suara sekitar", "Lainnya", "Tidak yakin").forEach { label ->
                             DropdownMenuItem(text = { Text(label) }, onClick = { showLabels = false; onLabel(label) })
                         }
                     }
                 }
-                TextButton(onClick = { confirmDelete = true }) { Text("Hapus") }
+                TextButton(onClick = { confirmDelete = true }, enabled = editable) { Text("Hapus") }
             }
         }
     }
@@ -313,4 +354,18 @@ private fun ClipCard(
         confirmButton = { TextButton(onClick = { confirmDelete = false; onDelete() }) { Text("Hapus") } },
         dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Batal") } },
     )
+}
+
+private fun sessionStatusLabel(status: String): String = when (status) {
+    "recording" -> "Sedang merekam"
+    "completed" -> "Selesai"
+    "interrupted" -> "Terputus"
+    "auto_stopped" -> "Berhenti otomatis"
+    else -> status
+}
+
+private fun formatStorageSize(bytes: Long): String = when {
+    bytes >= 1024L * 1024L -> "%.1f MB".format(bytes.toDouble() / (1024L * 1024L))
+    bytes >= 1024L -> "%.0f KB".format(bytes.toDouble() / 1024L)
+    else -> bytes.toString() + " B"
 }

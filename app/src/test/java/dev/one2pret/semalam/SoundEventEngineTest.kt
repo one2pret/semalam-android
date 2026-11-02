@@ -11,6 +11,8 @@ class SoundEventEngineTest {
         val detector = SoundEventEngine(onEvent = { _, _, d -> received++; duration = d })
         repeat(190) { detector.accept(ShortArray(1024) { 40 }) }
         assertTrue(detector.isCalibrated)
+        assertEquals(100, detector.calibrationPercent)
+        assertTrue(detector.lastInputDb != null)
         repeat(25) { detector.accept(ShortArray(1024) { 9_000 }) }
         repeat(30) { detector.accept(ShortArray(1024) { 40 }) }
         detector.finish()
@@ -24,6 +26,13 @@ class SoundEventEngineTest {
         repeat(400) { detector.accept(ShortArray(1024) { 40 }) }
         detector.finish()
         assertEquals(0, received)
+    }
+
+    @Test fun calibrationProgressStaysBelowHundredBeforeTwelveSeconds() {
+        val detector = SoundEventEngine(onEvent = { _, _, _ -> })
+        repeat(90) { detector.accept(ShortArray(1024) { 40 }) }
+        assertTrue(detector.calibrationPercent in 1..99)
+        assertTrue(!detector.isCalibrated)
     }
 
     @Test fun rejectsSingleLoudTransient() {

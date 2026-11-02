@@ -25,6 +25,12 @@ class SoundEventEngine(
 
     val isCalibrated: Boolean get() = thresholdDb != null
     val threshold: Double? get() = thresholdDb
+    val calibrationPercent: Int
+        get() = (observedSamples * 100L / (sampleRate * 12L)).toInt().coerceIn(0, 100)
+    var lastInputDb: Double? = null
+        private set
+    var qualifyingEvents: Int = 0
+        private set
 
     fun accept(input: ShortArray, validSamples: Int = input.size) {
         if (validSamples <= 0) return
@@ -36,6 +42,7 @@ class SoundEventEngine(
             sum + normalized * normalized
         } / validSamples)
         val db = 20.0 * log10(rms.coerceAtLeast(0.00001))
+        lastInputDb = db
 
         if (thresholdDb == null) {
             calibrationLevels.add(db)
@@ -98,6 +105,7 @@ class SoundEventEngine(
                 segment.copyInto(output, offset)
                 offset += segment.size
             }
+            qualifyingEvents++
             onEvent(output, eventStartMs, eventSamples * 1000L / sampleRate)
         }
         currentEvent.clear()

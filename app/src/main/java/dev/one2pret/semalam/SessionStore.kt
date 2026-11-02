@@ -5,6 +5,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
+import java.io.BufferedOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -27,6 +28,8 @@ internal data class SleepSession(
     val message: String,
     val clips: List<SoundClip>,
 )
+
+internal data class StorageSummary(val bytes: Long, val sessions: Int, val clips: Int)
 
 internal class SessionStore(context: Context) {
     private val base = File(context.filesDir, "sleep_sessions").apply { mkdirs() }
@@ -86,22 +89,39 @@ internal class SessionStore(context: Context) {
         val safeLabels = setOf("Belum dilabeli", "Mirip dengkuran", "Mirip berbicara", "Suara sekitar", "Lainnya", "Tidak yakin")
         if (label !in safeLabels) return
         val old = get(sessionId) ?: return
+        if (old.status == "recording") return
         write(old.copy(clips = old.clips.map { if (it.id == clipId) it.copy(label = label) else it }))
     }
 
     @Synchronized
-    fun removeClip(sessionId: String, clipId: String) {
-        val old = get(sessionId) ?: return
-        val clip = old.clips.firstOrNull { it.id == clipId } ?: return
-        File(sessionDir(sessionId), clip.fileName).delete()
-        write(old.copy(clips = old.clips.filterNot { it.id == clipId }))
+    fun removeClip(sessionId: String, clipId: String): Boolean {
+        val old = get(sessionId) ?: return false
+        // No edits to an active session: the recorder and UI own different store instances.
+        if (old.status == "recording" || RecorderStatus.isRecording && old.status == "recording") return false
+        val clip = old.clips.firstOrNull { it.id == clipId } ?: return false
+        val audioFile = File(sessionDir(sessionId), clip.fileName)
+        if (!audioFile.exists() || !audioFile.delete()) return false
+        return try {
+            write(old.copy(clips = old.clips.filterNot { it.id == clipId }))
+            true
+        } catch (_: Exception) {
+            false // UI reports failure rather than falsely claiming the file was deleted.
+        }
     }
 
     @Synchronized
-    fun removeSession(id: String) {
-        val old = get(id) ?: return
-        if (old.status == "recording") return
-        sessionDir(id).deleteRecursively()
+    fun removeSession(id: String): Boolean {
+        val old = get(id) ?: return false
+        if (old.status == "recording") return false
+        val folder = sessionDir(id)
+        return folder.deleteRecursively() && !folder.exists()
+    }
+
+    fun storageSummary(): StorageSummary {
+        val sessions = list()
+        // Include metadata and any residual WAV/temp files when reporting used storage.
+        val bytes = base.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+        return StorageSummary(bytes, sessions.size, sessions.sumOf { it.clips.size })
     }
 
     fun clipFile(sessionId: String, clip: SoundClip): File = File(sessionDir(sessionId), clip.fileName)
@@ -164,7 +184,8 @@ internal object WavFiles {
     private const val SAMPLE_RATE = 16_000
     fun write(destination: File, samples: ShortArray) {
         val temp = File(destination.parentFile, destination.name + ".tmp")
-        FileOutputStream(temp).use { out ->
+        FileOutputStream(temp).use { fileOut ->
+            val out = BufferedOutputStream(fileOut)
             val payloadBytes = samples.size * 2
             fun writeLE(value: Int, bytes: Int) {
                 repeat(bytes) { index -> out.write((value ushr (index * 8)) and 0xff) }
@@ -182,7 +203,8 @@ internal object WavFiles {
             out.write("data".toByteArray(Charsets.US_ASCII))
             writeLE(payloadBytes, 4)
             samples.forEach { sample -> writeLE(sample.toInt() and 0xffff, 2) }
-            out.fd.sync()
+            out.flush()
+            fileOut.fd.sync()
         }
         if (!temp.renameTo(destination)) {
             temp.copyTo(destination, overwrite = true)

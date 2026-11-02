@@ -12,8 +12,8 @@ android {
         applicationId = "dev.one2pret.semalam.prototype"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0-alpha01"
+        versionCode = 2
+        versionName = "0.1.0-alpha02"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -31,7 +31,7 @@ android {
 
     buildTypes {
         getByName("debug") {
-            applicationIdSuffix = ".debug"
+            applicationIdSuffix = ".alpha02"
             val keystorePath = System.getenv("SEMALAM_KEYSTORE_PATH")
             if (!keystorePath.isNullOrBlank()) {
                 signingConfig = signingConfigs.getByName("testingStable")

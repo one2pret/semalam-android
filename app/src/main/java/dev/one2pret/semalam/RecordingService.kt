@@ -30,6 +30,7 @@ internal object RecorderStatus {
     @Volatile var inputDb: Double? = null
     @Volatile var detectedEvents: Int = 0
     @Volatile var savedClips: Int = 0
+    @Volatile var scheduledStopAt: Long? = null
 }
 
 /** User-initiated foreground service, never started by a bedtime alarm. */
@@ -82,6 +83,7 @@ class RecordingService : Service() {
                     running.set(false)
                     RecorderStatus.isRecording = false
                     RecorderStatus.phase = "idle"
+                    RecorderStatus.scheduledStopAt = null
                     releaseResources()
                     stopSelf()
                 }
@@ -115,6 +117,7 @@ class RecordingService : Service() {
         recorder = localRecorder
         val sessionStore = SessionStore(this)
         val session = sessionStore.startSession()
+        RecorderStatus.scheduledStopAt = AutoStopSettings.deadline(this, session.startedMs)
         requestedStop = false
         RecorderStatus.lastError = null
         RecorderStatus.calibrationPercent = 0
@@ -154,6 +157,12 @@ class RecordingService : Service() {
             val frame = ShortArray(1024)
             var silentReads = 0
             while (running.get()) {
+                val scheduled = RecorderStatus.scheduledStopAt
+                if (scheduled != null && System.currentTimeMillis() >= scheduled) {
+                    status = "scheduled_stop"
+                    message = "Sesi berhenti otomatis sesuai jam yang dipilih."
+                    break
+                }
                 if (SystemClock.elapsedRealtime() - started >= MAX_SESSION_MS) {
                     status = "auto_stopped"
                     message = "Sesi dihentikan otomatis setelah 12 jam."
@@ -205,6 +214,7 @@ class RecordingService : Service() {
             running.set(false)
             RecorderStatus.isRecording = false
             RecorderStatus.phase = "idle"
+            RecorderStatus.scheduledStopAt = null
             try { store.finish(sessionId, status, message) } catch (_: Exception) { /* recovery on next launch */ }
             releaseResources()
             stopForeground(STOP_FOREGROUND_REMOVE)

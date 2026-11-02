@@ -86,7 +86,7 @@ internal class SessionStore(context: Context) {
 
     @Synchronized
     fun updateLabel(sessionId: String, clipId: String, label: String) {
-        val safeLabels = setOf("Belum dilabeli", "Mirip dengkuran", "Mirip berbicara", "Suara sekitar", "Lainnya", "Tidak yakin")
+        val safeLabels = setOf("Belum dilabeli", "Mirip dengkuran", "Mirip berbicara", "Suara sekitar", "Suara keras dari luar", "Batuk / suara tubuh", "Lainnya", "Tidak yakin")
         if (label !in safeLabels) return
         val old = get(sessionId) ?: return
         if (old.status == "recording") return
@@ -215,4 +215,8 @@ internal object WavFiles {
 
 internal fun formatClock(millis: Long): String = SimpleDateFormat("HH:mm", Locale("id", "ID")).format(Date(millis))
 internal fun formatDate(millis: Long): String = SimpleDateFormat("EEE, dd MMM yyyy", Locale("id", "ID")).format(Date(millis))
-internal fun formatDuration(millis: Long): String = "${millis / 3_600_000L}j ${(millis / 60_000L) % 60}m"
+internal fun formatDuration(millis: Long): String {
+    val secs = millis.coerceAtLeast(0L) / 1000L
+    return if (secs < 3600L) "%02d:%02d".format(secs / 60L, secs % 60L)
+    else "%dj %02dm".format(secs / 3600L, (secs / 60L) % 60L)
+}

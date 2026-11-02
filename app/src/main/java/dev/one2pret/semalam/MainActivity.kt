@@ -81,6 +81,11 @@ private fun SemalamScreen() {
     var reminderEnabled by remember { mutableStateOf(BedtimeSchedule.isEnabled(context)) }
     var reminderHour by remember { mutableStateOf(BedtimeSchedule.hour(context)) }
     var reminderMinute by remember { mutableStateOf(BedtimeSchedule.minute(context)) }
+    var autoStopEnabled by remember { mutableStateOf(AutoStopSettings.enabled(context)) }
+    var autoStopHour by remember { mutableStateOf(AutoStopSettings.hour(context)) }
+    var autoStopMinute by remember { mutableStateOf(AutoStopSettings.minute(context)) }
+    var stopDeadline by remember { mutableStateOf(RecorderStatus.scheduledStopAt) }
+    var selectedFilter by remember { mutableStateOf("Semua") }
     var showDeleteSession by remember { mutableStateOf(false) }
     var statusText by remember { mutableStateOf("") }
     var player: MediaPlayer? by remember { mutableStateOf(null) }
@@ -100,6 +105,7 @@ private fun SemalamScreen() {
         inputDb = RecorderStatus.inputDb
         detectedEvents = RecorderStatus.detectedEvents
         savedClips = RecorderStatus.savedClips
+        stopDeadline = RecorderStatus.scheduledStopAt
         storage = store.storageSummary()
         if (recordingPhase != "starting" && recordingPhase != "stopping" &&
             statusText in listOf("Memulai perekaman…", "Menghentikan dan menyimpan sesi…")
@@ -143,6 +149,7 @@ private fun SemalamScreen() {
     }
 
     val current = sessions.firstOrNull { it.id == selectedId }
+    val dashboard = current?.let { SoundDashboard.summarize(it.clips.map { clip -> clip.label }) }
     val isCurrentRecording = recordingPhase in setOf("starting", "calibrating", "recording", "stopping") ||
         (recording && sessions.any { it.status == "recording" })
     val colors = darkColorScheme(
@@ -180,6 +187,10 @@ private fun SemalamScreen() {
                             Text("Level mikrofon: ${inputDb?.toInt() ?: "—"} dBFS (diagnostik)")
                             Text("Kejadian: " + detectedEvents + " · Cuplikan disimpan: " + savedClips)
                         }
+                        if (isCurrentRecording && stopDeadline != null) {
+                            Text("Berhenti otomatis sekitar " + formatClock(stopDeadline!!) + " jika sesi tetap aktif.",
+                                style = MaterialTheme.typography.bodySmall, color = Color(0xFFBFCBE3))
+                        }
                         if (recordingPhase == "stopping") {
                             Text("Menyimpan hasil sesi…")
                         } else if (isCurrentRecording) {
@@ -205,6 +216,30 @@ private fun SemalamScreen() {
                 if (statusText.isNotEmpty() || RecorderStatus.lastError != null) {
                     Text(RecorderStatus.lastError ?: statusText, color = Color(0xFFFFD8A0))
                 }
+                if (current != null && dashboard != null) {
+                    Card(colors = CardDefaults.cardColors(containerColor = panel), modifier = Modifier.fillMaxWidth()) {
+                        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+                            Text("Dashboard kejadian malam", style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold)
+                            Text(formatDate(current.startedMs) + " · " + dashboard.total + " cuplikan · " +
+                                sessionStatusLabel(current.status), style = MaterialTheme.typography.bodySmall)
+                            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                                    Text(dashboard.snoring.toString() + " · Mirip dengkuran")
+                                    Text(dashboard.sleepTalking.toString() + " · Mirip mengigau/bicara")
+                                    Text(dashboard.bodySound.toString() + " · Batuk/suara tubuh")
+                                }
+                                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                                    Text(dashboard.environment.toString() + " · Suara lingkungan")
+                                    Text(dashboard.unreviewed.toString() + " · Belum ditinjau")
+                                    Text(dashboard.other.toString() + " · Lainnya")
+                                }
+                            }
+                            Text("Angka berasal dari LABEL yang Anda pilih sesudah mendengarkan, bukan klasifikasi otomatis atau diagnosis gangguan tidur.",
+                                style = MaterialTheme.typography.bodySmall, color = Color(0xFFBFCBE3))
+                        }
+                    }
+                }
                 Card(colors = CardDefaults.cardColors(containerColor = panel), modifier = Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         Text("Pengingat tidur", fontWeight = FontWeight.SemiBold)
@@ -228,6 +263,27 @@ private fun SemalamScreen() {
                         Text("Pengingat tidak menyalakan mikrofon otomatis dan dapat terlambat akibat hemat baterai.", style = MaterialTheme.typography.bodySmall, color = Color(0xFFBBC8E0))
                     }
                 }
+                Card(colors = CardDefaults.cardColors(containerColor = panel), modifier = Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text("Berhenti otomatis", fontWeight = FontWeight.SemiBold)
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                            Text("Aktifkan jam berhenti", modifier = Modifier.weight(1f))
+                            Switch(checked = autoStopEnabled, enabled = !isCurrentRecording, onCheckedChange = { enabled ->
+                                autoStopEnabled = enabled
+                                AutoStopSettings.save(context, enabled, autoStopHour, autoStopMinute)
+                            })
+                        }
+                        OutlinedButton(enabled = !isCurrentRecording, onClick = {
+                            TimePickerDialog(context, { _, hour, minute ->
+                                autoStopHour = hour
+                                autoStopMinute = minute
+                                AutoStopSettings.save(context, autoStopEnabled, hour, minute)
+                            }, autoStopHour, autoStopMinute, true).show()
+                        }) { Text("Jam berhenti: %02d:%02d".format(autoStopHour, autoStopMinute)) }
+                        Text("Berlaku untuk sesi berikutnya setelah Anda tekan Mulai. File tetap tersimpan dan mikrofon tidak dinyalakan otomatis.",
+                            style = MaterialTheme.typography.bodySmall, color = Color(0xFFBFCBE3))
+                    }
+                }
                 HorizontalDivider(color = Color(0xFF40506D))
                 Text("Riwayat perekaman", style = MaterialTheme.typography.titleLarge)
                 Text("Penyimpanan lokal: ${formatStorageSize(storage.bytes)} · ${storage.sessions} sesi · ${storage.clips} cuplikan",
@@ -240,7 +296,7 @@ private fun SemalamScreen() {
                     Card(
                         colors = CardDefaults.cardColors(containerColor = if (selected) Color(0xFF344360) else panel),
                         modifier = Modifier.fillMaxWidth(),
-                        onClick = { stopPlayback(); selectedId = session.id }
+                        onClick = { stopPlayback(); selectedId = session.id; selectedFilter = "Semua" }
                     ) {
                         Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
                             Column(Modifier.weight(1f)) {
@@ -258,7 +314,26 @@ private fun SemalamScreen() {
                     Text("Status: ${sessionStatusLabel(current.status)}", color = Color(0xFFBBC8E0))
                     if (current.message.isNotEmpty()) Text("Catatan: ${current.message}", color = Color(0xFFFFD8A0))
                     if (current.clips.isEmpty()) Text("Belum ada suara yang melewati ambang deteksi. Hasil kosong bukan berarti tidur tanpa gangguan.")
-                    current.clips.forEach { clip ->
+                    if (current.clips.isNotEmpty()) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("Filter: ", style = MaterialTheme.typography.bodySmall)
+                            androidx.compose.foundation.layout.Box {
+                                var showFilter by remember { mutableStateOf(false) }
+                                OutlinedButton(onClick = { showFilter = true }) { Text(selectedFilter) }
+                                DropdownMenu(expanded = showFilter, onDismissRequest = { showFilter = false }) {
+                                    listOf("Semua", "Dengkuran", "Berbicara", "Lingkungan", "Suara tubuh", "Belum ditinjau").forEach { choice ->
+                                        DropdownMenuItem(text = { Text(choice) }, onClick = {
+                                            selectedFilter = choice
+                                            showFilter = false
+                                        })
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    val filteredClips = current.clips.filter { SoundDashboard.matchesFilter(it.label, selectedFilter) }
+                    if (filteredClips.isEmpty() && current.clips.isNotEmpty()) Text("Tidak ada cuplikan dalam kategori ini.")
+                    filteredClips.forEach { clip ->
                         ClipCard(
                             session = current, clip = clip, isPlaying = playingClip == clip.id,
                             editable = current.status != "recording",
@@ -338,7 +413,7 @@ private fun ClipCard(
                 androidx.compose.foundation.layout.Box {
                     TextButton(onClick = { showLabels = true }, enabled = editable) { Text("Label") }
                     DropdownMenu(expanded = showLabels, onDismissRequest = { showLabels = false }) {
-                        listOf("Mirip dengkuran", "Mirip berbicara", "Suara sekitar", "Lainnya", "Tidak yakin").forEach { label ->
+                        listOf("Mirip dengkuran", "Mirip berbicara", "Suara sekitar", "Suara keras dari luar", "Batuk / suara tubuh", "Lainnya", "Tidak yakin").forEach { label ->
                             DropdownMenuItem(text = { Text(label) }, onClick = { showLabels = false; onLabel(label) })
                         }
                     }
@@ -361,6 +436,7 @@ private fun sessionStatusLabel(status: String): String = when (status) {
     "completed" -> "Selesai"
     "interrupted" -> "Terputus"
     "auto_stopped" -> "Berhenti otomatis"
+    "scheduled_stop" -> "Berhenti sesuai jadwal"
     else -> status
 }
 

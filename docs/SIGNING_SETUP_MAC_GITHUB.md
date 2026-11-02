@@ -32,11 +32,21 @@ Gunakan kata sandi kuat. Untuk build Android, **gunakan password key yang sama d
 
 ```bash
 gh auth status
-gh secret set SEMALAM_TESTING_KEYSTORE_BASE64 -R one2pret/semalam-android < <(base64 < "$HOME/.android/semalam/semalam-testing.jks" | tr -d '\\n')
+gh secret set SEMALAM_TESTING_KEYSTORE_BASE64 -R one2pret/semalam-android < <(base64 < "$HOME/.android/semalam/semalam-testing.jks" | tr -d '\n')
 gh secret set SEMALAM_TESTING_KEY_ALIAS -R one2pret/semalam-android --body "semalam-testing"
 ```
 
-Untuk password, **hindari password dalam argument CLI**. Jalankan tiap perintah `gh secret set NAME -R one2pret/semalam-android` dan ketikkan password lewat stdin secara aman, atau gunakan skrip privat yang membaca `read -s` dan mem-pipe secret tanpa menampilkannya. Variabel yang harus diatur:
+Untuk password, **hindari password dalam argument CLI**. Gunakan prompt senyap berikut pada terminal **zsh** MacBook (tidak menulis password ke history):
+
+```zsh
+read -rs 'SEMALAM_PW?Masukkan password keystore: '
+printf '\n'
+printf '%s' "$SEMALAM_PW" | gh secret set SEMALAM_TESTING_STORE_PASSWORD -R one2pret/semalam-android
+printf '%s' "$SEMALAM_PW" | gh secret set SEMALAM_TESTING_KEY_PASSWORD -R one2pret/semalam-android
+unset SEMALAM_PW
+```
+
+Variabel yang harus diatur:
 
 - SEMALAM_TESTING_STORE_PASSWORD
 - SEMALAM_TESTING_KEY_PASSWORD

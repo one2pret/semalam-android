@@ -447,7 +447,7 @@ private fun SemalamScreen() {
                                         }, enabled = queueIndex + 1 < playbackQueue.size) { Text("Berikutnya ▶") }
                                     }
                                 }
-                                Text("Play All mengikuti filter "" + selectedFilter + ""; cuplikan selanjutnya diputar otomatis.",
+                                Text("Play All mengikuti filter " + selectedFilter + "; cuplikan selanjutnya diputar otomatis.",
                                     style = MaterialTheme.typography.bodySmall, color = Color(0xFFBFCBE3))
                             }
                         }

@@ -5,6 +5,7 @@ import android.app.TimePickerDialog
 import android.content.Context
 import android.content.pm.PackageManager
 import android.media.MediaPlayer
+import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -12,6 +13,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -19,6 +21,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.rememberScrollState
@@ -42,17 +45,23 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.File
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -90,6 +99,13 @@ private fun SemalamScreen() {
     var statusText by remember { mutableStateOf("") }
     var player: MediaPlayer? by remember { mutableStateOf(null) }
     var playingClip by remember { mutableStateOf<String?>(null) }
+    var playbackSession by remember { mutableStateOf<String?>(null) }
+    var playbackQueue by remember { mutableStateOf<List<String>>(emptyList()) }
+    var queueIndex by remember { mutableStateOf(-1) }
+    var isPaused by remember { mutableStateOf(false) }
+    var playbackPositionMs by remember { mutableStateOf(0) }
+    var playbackDurationMs by remember { mutableStateOf(0) }
+    var playbackSerial by remember { mutableStateOf(0) }
 
     fun refresh() {
         store.markStaleSessions()
@@ -112,10 +128,76 @@ private fun SemalamScreen() {
         ) statusText = ""
     }
 
-    fun stopPlayback() {
-        try { player?.stop(); player?.release() } catch (_: Exception) { }
+    fun clearPlayer() {
+        playbackSerial++
+        val previous = player
         player = null
         playingClip = null
+        isPaused = false
+        playbackPositionMs = 0
+        playbackDurationMs = 0
+        try { previous?.setOnCompletionListener(null); previous?.stop(); previous?.release() } catch (_: Exception) {
+            try { previous?.release() } catch (_: Exception) { }
+        }
+    }
+
+    fun stopPlayback() {
+        clearPlayer()
+        playbackSession = null
+        playbackQueue = emptyList()
+        queueIndex = -1
+    }
+
+    fun playQueueAt(sessionId: String, clipIds: List<String>, index: Int) {
+        if (index !in clipIds.indices) { stopPlayback(); return }
+        clearPlayer()
+        val clipId = clipIds[index]
+        val clip = store.get(sessionId)?.clips?.firstOrNull { it.id == clipId }
+        if (clip == null) {
+            statusText = "Cuplikan sudah tidak tersedia. Daftar putar dihentikan."
+            stopPlayback()
+            return
+        }
+        val serial = playbackSerial
+        try {
+            val file = store.clipFile(sessionId, clip)
+            val next = MediaPlayer().apply {
+                setAudioStreamType(AudioManager.STREAM_MUSIC)
+                setDataSource(file.absolutePath)
+                prepare()
+            }
+            playbackSession = sessionId
+            playbackQueue = clipIds
+            queueIndex = index
+            playbackDurationMs = next.duration
+            playbackPositionMs = 0
+            playingClip = clipId
+            player = next
+            next.setOnCompletionListener {
+                if (serial == playbackSerial && playbackSession == sessionId) {
+                    if (index + 1 < clipIds.size) playQueueAt(sessionId, clipIds, index + 1)
+                    else stopPlayback()
+                }
+            }
+            next.start()
+            statusText = ""
+        } catch (_: Exception) {
+            stopPlayback()
+            statusText = "Cuplikan tidak bisa diputar. Periksa file audio."
+        }
+    }
+
+    fun togglePause() {
+        val active = player ?: return
+        try {
+            if (active.isPlaying) {
+                active.pause()
+                isPaused = true
+            } else {
+                active.start()
+                isPaused = false
+            }
+        } catch (_: Exception) { stopPlayback() }
     }
 
     fun startRecording() {
@@ -142,6 +224,12 @@ private fun SemalamScreen() {
         while (true) {
             refresh()
             delay(1_500L)
+        }
+    }
+    LaunchedEffect(playingClip, isPaused) {
+        while (playingClip != null && !isPaused) {
+            try { playbackPositionMs = player?.currentPosition ?: 0 } catch (_: Exception) { }
+            delay(120L)
         }
     }
     DisposableEffect(Unit) {
@@ -323,6 +411,7 @@ private fun SemalamScreen() {
                                 DropdownMenu(expanded = showFilter, onDismissRequest = { showFilter = false }) {
                                     listOf("Semua", "Dengkuran", "Berbicara", "Lingkungan", "Suara tubuh", "Belum ditinjau").forEach { choice ->
                                         DropdownMenuItem(text = { Text(choice) }, onClick = {
+                                            stopPlayback()
                                             selectedFilter = choice
                                             showFilter = false
                                         })
@@ -333,25 +422,45 @@ private fun SemalamScreen() {
                     }
                     val filteredClips = current.clips.filter { SoundDashboard.matchesFilter(it.label, selectedFilter) }
                     if (filteredClips.isEmpty() && current.clips.isNotEmpty()) Text("Tidak ada cuplikan dalam kategori ini.")
+                    if (filteredClips.isNotEmpty()) {
+                        Card(colors = CardDefaults.cardColors(containerColor = panel), modifier = Modifier.fillMaxWidth()) {
+                            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+                                Text("Pemutar cuplikan", fontWeight = FontWeight.SemiBold)
+                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    Button(onClick = {
+                                        if (playbackSession == current.id && playingClip != null && playbackQueue.size == filteredClips.size &&
+                                            playbackQueue == filteredClips.map { it.id }) togglePause()
+                                        else playQueueAt(current.id, filteredClips.map { it.id }, 0)
+                                    }) { Text(if (playbackSession == current.id && playingClip != null && playbackQueue.size == filteredClips.size && playbackQueue == filteredClips.map { it.id } && !isPaused) "⏸ Jeda" else "▶ Play All") }
+                                    OutlinedButton(onClick = { stopPlayback() }, enabled = playingClip != null) { Text("■ Stop") }
+                                }
+                                if (playbackSession == current.id && playingClip != null) {
+                                    val indexText = (queueIndex + 1).coerceAtLeast(1).toString() + "/" + playbackQueue.size
+                                    Text("Cuplikan " + indexText + " · " + formatPlaybackTime(playbackPositionMs) +
+                                        " / " + formatPlaybackTime(playbackDurationMs), style = MaterialTheme.typography.bodySmall)
+                                    Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                                        OutlinedButton(onClick = {
+                                            if (queueIndex > 0) playQueueAt(current.id, playbackQueue, queueIndex - 1)
+                                        }, enabled = queueIndex > 0) { Text("◀ Sebelumnya") }
+                                        OutlinedButton(onClick = {
+                                            if (queueIndex + 1 < playbackQueue.size) playQueueAt(current.id, playbackQueue, queueIndex + 1)
+                                        }, enabled = queueIndex + 1 < playbackQueue.size) { Text("Berikutnya ▶") }
+                                    }
+                                }
+                                Text("Play All mengikuti filter " + selectedFilter + "; cuplikan selanjutnya diputar otomatis.",
+                                    style = MaterialTheme.typography.bodySmall, color = Color(0xFFBFCBE3))
+                            }
+                        }
+                    }
                     filteredClips.forEach { clip ->
                         ClipCard(
                             session = current, clip = clip, isPlaying = playingClip == clip.id,
+                            isPaused = isPaused, progressMs = playbackPositionMs, durationMs = playbackDurationMs,
+                            audioFile = store.clipFile(current.id, clip),
                             editable = current.status != "recording",
                             onPlay = {
-                                if (playingClip == clip.id) stopPlayback() else {
-                                    stopPlayback()
-                                    try {
-                                        val file = store.clipFile(current.id, clip)
-                                        val next = MediaPlayer().apply {
-                                            setDataSource(file.absolutePath)
-                                            prepare()
-                                            setOnCompletionListener { stopPlayback() }
-                                            start()
-                                        }
-                                        player = next
-                                        playingClip = clip.id
-                                    } catch (_: Exception) { statusText = "File cuplikan tidak dapat diputar." }
-                                }
+                                if (playbackSession == current.id && playingClip == clip.id) togglePause()
+                                else playQueueAt(current.id, listOf(clip.id), 0)
                             },
                             onLabel = { label -> store.updateLabel(current.id, clip.id, label); refresh() },
                             onDelete = {
@@ -398,6 +507,10 @@ private fun ClipCard(
     session: SleepSession,
     clip: SoundClip,
     isPlaying: Boolean,
+    isPaused: Boolean,
+    progressMs: Int,
+    durationMs: Int,
+    audioFile: File,
     editable: Boolean,
     onPlay: () -> Unit,
     onLabel: (String) -> Unit,
@@ -408,8 +521,13 @@ private fun ClipCard(
     Card(colors = CardDefaults.cardColors(containerColor = panel), modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("${formatClock(session.startedMs + clip.offsetMs)} · ${clip.durationMs / 1000}s · ${clip.label}")
+            if (isPlaying) {
+                ClipWaveform(audioFile, if (durationMs > 0) progressMs.toFloat() / durationMs else 0f)
+                Text(formatPlaybackTime(progressMs) + " / " + formatPlaybackTime(durationMs),
+                    style = MaterialTheme.typography.bodySmall, color = Color(0xFFBFCBE3))
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                OutlinedButton(onClick = onPlay) { Text(if (isPlaying) "■ Stop" else "▶ Putar") }
+                OutlinedButton(onClick = onPlay) { Text(if (isPlaying && !isPaused) "⏸ Jeda" else if (isPlaying) "▶ Lanjut" else "▶ Putar") }
                 androidx.compose.foundation.layout.Box {
                     TextButton(onClick = { showLabels = true }, enabled = editable) { Text("Label") }
                     DropdownMenu(expanded = showLabels, onDismissRequest = { showLabels = false }) {
@@ -444,4 +562,37 @@ private fun formatStorageSize(bytes: Long): String = when {
     bytes >= 1024L * 1024L -> "%.1f MB".format(bytes.toDouble() / (1024L * 1024L))
     bytes >= 1024L -> "%.0f KB".format(bytes.toDouble() / 1024L)
     else -> bytes.toString() + " B"
+}
+
+private fun formatPlaybackTime(valueMs: Int): String {
+    val seconds = valueMs.coerceAtLeast(0) / 1000
+    return "%02d:%02d".format(seconds / 60, seconds % 60)
+}
+
+@Composable
+private fun ClipWaveform(file: File, progress: Float) {
+    var amplitudes by remember(file.absolutePath, file.length()) { mutableStateOf<List<Float>>(emptyList()) }
+    LaunchedEffect(file.absolutePath, file.length()) {
+        amplitudes = withContext(Dispatchers.IO) { WavWaveform.readPeaks(file) }
+    }
+    if (amplitudes.isEmpty()) {
+        Text("Memuat gelombang suara…", style = MaterialTheme.typography.bodySmall)
+        return
+    }
+    val fraction = progress.coerceIn(0f, 1f)
+    Canvas(modifier = Modifier.fillMaxWidth().height(52.dp)) {
+        val count = amplitudes.size
+        val pitch = size.width / count
+        amplitudes.forEachIndexed { index, amplitude ->
+            val x = (index + 0.5f) * pitch
+            val halfHeight = (amplitude.coerceIn(0f, 1f) * size.height * 0.46f).coerceAtLeast(2.dp.toPx())
+            drawLine(
+                color = if (index.toFloat() / count <= fraction) accent else Color(0xFF60718C),
+                start = Offset(x, size.height / 2f - halfHeight),
+                end = Offset(x, size.height / 2f + halfHeight),
+                strokeWidth = (pitch * 0.60f).coerceAtLeast(1.dp.toPx()),
+                cap = StrokeCap.Round
+            )
+        }
+    }
 }

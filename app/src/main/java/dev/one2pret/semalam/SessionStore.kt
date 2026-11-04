@@ -126,6 +126,9 @@ internal class SessionStore(context: Context) {
 
     fun clipFile(sessionId: String, clip: SoundClip): File = File(sessionDir(sessionId), clip.fileName)
 
+    /** Small metadata-only acoustic envelope. Recordings and legacy metadata remain unchanged. */
+    fun acousticFile(sessionId: String): File = File(sessionDir(sessionId), "acoustic_levels.csv")
+
     private fun usableSpaceBytes(): Long = base.usableSpace
     private fun sessionDir(id: String) = File(base, id)
 

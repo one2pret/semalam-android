@@ -5,6 +5,7 @@ import android.app.TimePickerDialog
 import android.content.Context
 import android.content.pm.PackageManager
 import android.media.MediaPlayer
+import android.media.audiofx.LoudnessEnhancer
 import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
@@ -109,6 +110,10 @@ private fun SemalamScreen() {
     var playbackPositionMs by remember { mutableStateOf(0) }
     var playbackDurationMs by remember { mutableStateOf(0) }
     var playbackSerial by remember { mutableStateOf(0) }
+    var boostDb by remember { mutableStateOf(0) } // Reset to 0 dB on every app launch.
+    var boostEffect: LoudnessEnhancer? by remember { mutableStateOf(null) }
+    var acousticPoints by remember { mutableStateOf<List<AcousticPoint>>(emptyList()) }
+    var acousticSession by remember { mutableStateOf<String?>(null) }
     var clipAmplitude by remember { mutableStateOf<Map<String, Float>>(emptyMap()) }
     var reviewedAmplitudeSession by remember { mutableStateOf<String?>(null) }
     var selectedTimeBin by remember { mutableStateOf<Int?>(null) }
@@ -140,6 +145,8 @@ private fun SemalamScreen() {
     fun clearPlayer() {
         playbackSerial++
         val previous = player
+        try { boostEffect?.enabled = false; boostEffect?.release() } catch (_: Exception) { }
+        boostEffect = null
         player = null
         playingClip = null
         isPaused = false
@@ -182,6 +189,18 @@ private fun SemalamScreen() {
             playbackPositionMs = 0
             playingClip = clipId
             player = next
+            if (boostDb > 0) {
+                try {
+                    boostEffect = LoudnessEnhancer(next.audioSessionId).apply {
+                        setTargetGain(boostDb * 100)
+                        enabled = true
+                    }
+                } catch (_: Exception) {
+                    boostEffect = null
+                    boostDb = 0
+                    statusText = "Audio Boost tidak didukung pada perangkat ini; menggunakan volume normal."
+                }
+            }
             next.setOnCompletionListener {
                 if (serial == playbackSerial && playbackSession == sessionId) {
                     if (index + 1 < clipIds.size) playQueueAt(sessionId, clipIds, index + 1)
@@ -193,6 +212,31 @@ private fun SemalamScreen() {
         } catch (_: Exception) {
             stopPlayback()
             statusText = "Cuplikan tidak bisa diputar. Periksa file audio."
+        }
+    }
+
+    fun setBoost(level: Int) {
+        boostDb = level.coerceIn(0, 9)
+        val active = player
+        if (active != null) {
+            try {
+                if (boostDb == 0) {
+                    boostEffect?.enabled = false
+                    boostEffect?.release()
+                    boostEffect = null
+                } else {
+                    if (boostEffect == null) {
+                        boostEffect = LoudnessEnhancer(active.audioSessionId)
+                    }
+                    boostEffect?.setTargetGain(boostDb * 100)
+                    boostEffect?.enabled = true
+                }
+            } catch (_: Exception) {
+                try { boostEffect?.release() } catch (_: Exception) { }
+                boostEffect = null
+                boostDb = 0
+                statusText = "Audio Boost tidak tersedia pada perangkat ini."
+            }
         }
     }
 
@@ -258,11 +302,25 @@ private fun SemalamScreen() {
             reviewedAmplitudeSession = source.id
         }
     }
+    LaunchedEffect(selectedId, sessions.firstOrNull { it.id == selectedId }?.finishedMs) {
+        val id = selectedId
+        acousticSession = null
+        acousticPoints = emptyList()
+        if (id != null) {
+            val data = withContext(Dispatchers.IO) { AcousticLog.read(store.acousticFile(id)) }
+            acousticPoints = data
+            acousticSession = id
+        }
+    }
     DisposableEffect(Unit) {
-        onDispose { try { player?.release() } catch (_: Exception) { } }
+        onDispose {
+            try { boostEffect?.release() } catch (_: Exception) { }
+            try { player?.release() } catch (_: Exception) { }
+        }
     }
 
     val current = sessions.firstOrNull { it.id == selectedId }
+    val sessionAcoustic = if (acousticSession == current?.id) acousticPoints else emptyList()
     val dashboard = current?.let { SoundDashboard.summarize(it.clips.map { clip -> clip.label }) }
     val sessionPeaks = if (current?.id == reviewedAmplitudeSession) clipAmplitude else emptyMap()
     val incidents = remember(current?.clips, sessionPeaks) {
@@ -443,6 +501,39 @@ private fun SemalamScreen() {
                     Text("Status: ${sessionStatusLabel(current.status)}", color = Color(0xFFBBC8E0))
                     if (current.message.isNotEmpty()) Text("Catatan: ${current.message}", color = Color(0xFFFFD8A0))
                     if (current.clips.isEmpty()) Text("Belum ada suara yang melewati ambang deteksi. Hasil kosong bukan berarti tidur tanpa gangguan.")
+                    if (sessionAcoustic.isNotEmpty()) {
+                        Card(colors = CardDefaults.cardColors(containerColor = panel), modifier = Modifier.fillMaxWidth()) {
+                            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+                                Text("Grafik fluktuasi mikrofon", style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold)
+                                Text("Ringkasan level suara tiap 5 detik (dBFS relatif). Tidak menyimpan audio penuh dan bukan ukuran desibel ruangan.",
+                                    style = MaterialTheme.typography.bodySmall, color = Color(0xFFBFCBE3))
+                                AcousticEnvelopeChart(
+                                    points = sessionAcoustic,
+                                    durationMs = sessionDuration,
+                                    onSelectOffset = { offsetMs ->
+                                        if (current.clips.isNotEmpty()) {
+                                            stopPlayback()
+                                            val nextBin = (offsetMs / NightReview.BIN_MS).toInt().coerceIn(0, timeBins.lastIndex)
+                                            selectedTimeBin = nextBin
+                                            selectedIncidentStart = null
+                                        }
+                                    }
+                                )
+                                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                    Text(formatClock(current.startedMs), style = MaterialTheme.typography.bodySmall)
+                                    Spacer(Modifier.weight(1f))
+                                    Text(formatClock(current.finishedMs ?: System.currentTimeMillis()),
+                                        style = MaterialTheme.typography.bodySmall)
+                                }
+                                Text("Ketuk grafik untuk memilih rentang 15 menit di daftar kejadian.",
+                                    style = MaterialTheme.typography.bodySmall, color = Color(0xFFBFCBE3))
+                            }
+                        }
+                    } else if (current.clips.isNotEmpty()) {
+                        Text("Grafik fluktuasi berkala tersedia untuk sesi baru mulai alpha07. Sesi lama tetap bisa dilihat melalui peta cuplikan.",
+                            style = MaterialTheme.typography.bodySmall, color = Color(0xFFBFCBE3))
+                    }
                     if (current.clips.isNotEmpty()) {
                         Card(colors = CardDefaults.cardColors(containerColor = panel), modifier = Modifier.fillMaxWidth()) {
                             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -585,6 +676,17 @@ private fun SemalamScreen() {
                         Card(colors = CardDefaults.cardColors(containerColor = panel), modifier = Modifier.fillMaxWidth()) {
                             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
                                 Text("Pemutar kelompok", fontWeight = FontWeight.SemiBold)
+                                Text("Audio Boost (penguatan playback, bukan volume hardware):",
+                                    style = MaterialTheme.typography.bodySmall)
+                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    listOf(0, 3, 6, 9).forEach { gain ->
+                                        OutlinedButton(onClick = { setBoost(gain) }, enabled = boostDb != gain) {
+                                            Text(if (gain == 0) "0 dB" else "+" + gain + " dB")
+                                        }
+                                    }
+                                }
+                                if (boostDb > 0) Text("Boost +" + boostDb + " dB aktif. Turunkan volume earphone sebelum mendengarkan.",
+                                    style = MaterialTheme.typography.bodySmall, color = Color(0xFFFFC779))
                                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                                     Button(onClick = {
                                         if (playbackSession == current.id && playingClip != null && playbackQueue.size == reviewClips.size &&
@@ -787,5 +889,46 @@ private fun NightActivityTimeline(
             )
         }
         drawLine(Color(0xFF506384), Offset(0f, baseline), Offset(size.width, baseline), strokeWidth = 1.dp.toPx())
+    }
+}
+
+@Composable
+private fun AcousticEnvelopeChart(
+    points: List<AcousticPoint>,
+    durationMs: Long,
+    onSelectOffset: (Long) -> Unit
+) {
+    if (points.isEmpty()) return
+    val barCount = 120
+    val duration = durationMs.coerceAtLeast(1L)
+    val peaks = remember(points, duration) {
+        val bins = FloatArray(barCount)
+        points.forEach { point ->
+            val index = ((point.offsetMs.toDouble() / duration) * barCount).toInt()
+                .coerceIn(0, barCount - 1)
+            bins[index] = maxOf(bins[index], AcousticLog.normalized(point.peakDbfs))
+        }
+        bins
+    }
+    Canvas(Modifier.fillMaxWidth().height(110.dp).pointerInput(duration) {
+        detectTapGestures { tap ->
+            if (size.width > 0) {
+                val offset = ((tap.x / size.width).coerceIn(0f, 1f) * duration).toLong()
+                onSelectOffset(offset)
+            }
+        }
+    }) {
+        val barWidth = size.width / barCount
+        val baseline = size.height * .94f
+        peaks.forEachIndexed { index, peak ->
+            val height = if (peak <= 0f) 1.dp.toPx() else peak * size.height * .88f
+            drawRect(
+                color = if (peak > .75f) Color(0xFFFFC779) else accent,
+                topLeft = Offset(index * barWidth, baseline - height),
+                size = Size(barWidth * .72f, height)
+            )
+        }
+        drawLine(Color(0xFF506384), Offset(0f, baseline), Offset(size.width, baseline),
+            strokeWidth = 1.dp.toPx())
     }
 }

@@ -137,6 +137,22 @@ class RecordingService : Service() {
         var clipLimitReached = false
         var lastHeartbeat = SystemClock.elapsedRealtime()
         val started = lastHeartbeat
+        val envelope = AcousticAccumulator()
+        val pendingEnvelope = mutableListOf<AcousticPoint>()
+        val envelopeFile = store.acousticFile(sessionId)
+        var envelopeDisabled = false
+
+        fun flushEnvelope() {
+            if (pendingEnvelope.isEmpty() || envelopeDisabled) return
+            try {
+                AcousticLog.appendBatch(envelopeFile, pendingEnvelope)
+                pendingEnvelope.clear()
+            } catch (_: Exception) {
+                envelopeDisabled = true
+                pendingEnvelope.clear()
+                RecorderStatus.lastError = "Grafik akustik tidak tersimpan; rekaman suara tetap berjalan."
+            }
+        }
         try {
             val power = getSystemService(Context.POWER_SERVICE) as PowerManager
             wakeLock = power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Semalam:AudioCapture")
@@ -182,6 +198,13 @@ class RecordingService : Service() {
                         engine.accept(frame, size)
                         RecorderStatus.calibrationPercent = engine.calibrationPercent
                         RecorderStatus.inputDb = engine.lastInputDb
+                        engine.lastInputDb?.let { db ->
+                            val offsetMs = SystemClock.elapsedRealtime() - started
+                            envelope.accept(offsetMs, db.toFloat())?.let { point ->
+                                if (!envelopeDisabled) pendingEnvelope.add(point)
+                            }
+                            if (pendingEnvelope.size >= 12) flushEnvelope()
+                        }
                         if (engine.isCalibrated && RecorderStatus.phase != "stopping") {
                             RecorderStatus.phase = "recording"
                         }
@@ -211,6 +234,10 @@ class RecordingService : Service() {
             message = "Perekaman terhenti: ${error.javaClass.simpleName}."
             RecorderStatus.lastError = message
         } finally {
+            envelope.finish()?.let { point ->
+                if (!envelopeDisabled) pendingEnvelope.add(point)
+            }
+            flushEnvelope()
             running.set(false)
             RecorderStatus.isRecording = false
             RecorderStatus.phase = "idle"

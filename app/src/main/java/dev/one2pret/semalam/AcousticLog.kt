@@ -15,7 +15,7 @@ internal data class AcousticPoint(
 
 internal object AcousticLog {
     const val INTERVAL_MS = 5_000L
-    private const val MAX_POINTS = 12 * 60 * 60 * 1000 / INTERVAL_MS
+    private const val MAX_POINTS = 8_640
 
     fun appendBatch(file: File, points: List<AcousticPoint>) {
         if (points.isEmpty()) return

@@ -65,6 +65,7 @@ import androidx.core.content.ContextCompat
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.launch
 import java.io.File
 
 class MainActivity : ComponentActivity() {
@@ -82,6 +83,7 @@ private val accent = Color(0xFFA0B6FF)
 private fun SemalamScreen() {
     val context = LocalContext.current
     val store = remember { SessionStore(context) }
+    val scope = rememberCoroutineScope()
     var sessions by remember { mutableStateOf(store.list()) }
     var selectedId by remember { mutableStateOf(sessions.firstOrNull()?.id) }
     var recording by remember { mutableStateOf(RecorderStatus.isRecording) }
@@ -100,6 +102,8 @@ private fun SemalamScreen() {
     var stopDeadline by remember { mutableStateOf(RecorderStatus.scheduledStopAt) }
     var selectedFilter by remember { mutableStateOf("Semua") }
     var showDeleteSession by remember { mutableStateOf(false) }
+    var showDeleteAudio by remember { mutableStateOf(false) }
+    var deletionInProgress by remember { mutableStateOf(false) }
     var statusText by remember { mutableStateOf("") }
     var player: MediaPlayer? by remember { mutableStateOf(null) }
     var playingClip by remember { mutableStateOf<String?>(null) }
@@ -287,15 +291,21 @@ private fun SemalamScreen() {
     }
     // Amplitude summary is a bounded WAV sample, computed off the UI thread.
     // Recomputed when changing session or when a clip is added/deleted.
-    LaunchedEffect(selectedId, sessions.firstOrNull { it.id == selectedId }?.clips?.map { it.id }) {
+    LaunchedEffect(
+        selectedId,
+        sessions.firstOrNull { it.id == selectedId }?.clips?.map { Triple(it.id, it.sampledPeak, it.label) },
+        sessions.firstOrNull { it.id == selectedId }?.audioDeleted
+    ) {
         val source = sessions.firstOrNull { it.id == selectedId }
         reviewedAmplitudeSession = null
         clipAmplitude = emptyMap()
         if (source != null && source.status != "recording") {
             val peaks = withContext(Dispatchers.IO) {
                 source.clips.associate { clip ->
-                    val sampled = WavWaveform.readPeaks(store.clipFile(source.id, clip), bars = 24)
-                    clip.id to (sampled.maxOrNull() ?: 0f)
+                    val peak = clip.sampledPeak ?: WavWaveform.readPeaks(
+                        store.clipFile(source.id, clip), bars = 24
+                    ).maxOrNull() ?: 0f
+                    clip.id to peak
                 }
             }
             clipAmplitude = peaks
@@ -403,6 +413,8 @@ private fun SemalamScreen() {
                                 fontWeight = FontWeight.Bold)
                             Text(formatDate(current.startedMs) + " · " + dashboard.total + " cuplikan · " +
                                 sessionStatusLabel(current.status), style = MaterialTheme.typography.bodySmall)
+                            if (current.audioDeleted) Text("Audio dihapus · Riwayat dan grafik tetap tersimpan",
+                                color = Color(0xFFFFC779), style = MaterialTheme.typography.bodySmall)
                             Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
                                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
                                     Text(dashboard.snoring.toString() + " · Mirip dengkuran")
@@ -499,6 +511,10 @@ private fun SemalamScreen() {
                     Text("Detail sesi", style = MaterialTheme.typography.titleLarge)
                     Text("Mulai: ${formatClock(current.startedMs)} · Durasi sesi: ${formatDuration((current.finishedMs ?: System.currentTimeMillis()) - current.startedMs)}")
                     Text("Status: ${sessionStatusLabel(current.status)}", color = Color(0xFFBBC8E0))
+                    if (current.audioDeleted) Text(
+                        "Arsip laporan: Audio telah dihapus. Tanggal, label, kelompok kejadian, dan grafik tetap tersedia. Audio tidak dapat diputar kembali.",
+                        color = Color(0xFFFFC779), style = MaterialTheme.typography.bodySmall
+                    )
                     if (current.message.isNotEmpty()) Text("Catatan: ${current.message}", color = Color(0xFFFFD8A0))
                     if (current.clips.isEmpty()) Text("Belum ada suara yang melewati ambang deteksi. Hasil kosong bukan berarti tidur tanpa gangguan.")
                     if (sessionAcoustic.isNotEmpty()) {
@@ -626,10 +642,15 @@ private fun SemalamScreen() {
                                                 Text("Dipilih — cuplikan ditampilkan di bawah",
                                                     color = accent, style = MaterialTheme.typography.bodySmall)
                                             }
-                                            OutlinedButton(onClick = {
-                                                selectedIncidentStart = incident.firstOffsetMs
-                                                playQueueAt(current.id, incident.clipIds, 0)
-                                            }) { Text("▶ Putar kelompok") }
+                                            if (!current.audioDeleted) {
+                                                OutlinedButton(onClick = {
+                                                    selectedIncidentStart = incident.firstOffsetMs
+                                                    playQueueAt(current.id, incident.clipIds, 0)
+                                                }) { Text("▶ Putar kelompok") }
+                                            } else {
+                                                Text("Audio dihapus · lihat ringkasan saja",
+                                                    color = Color(0xFFBFCBE3), style = MaterialTheme.typography.bodySmall)
+                                            }
                                         }
                                     }
                                 }
@@ -672,7 +693,7 @@ private fun SemalamScreen() {
                     } else if (reviewClips.isEmpty()) {
                         Text("Tidak ada cuplikan dalam kelompok ini dengan filter sekarang.")
                     }
-                    if (reviewClips.isNotEmpty()) {
+                    if (reviewClips.isNotEmpty() && !current.audioDeleted) {
                         Card(colors = CardDefaults.cardColors(containerColor = panel), modifier = Modifier.fillMaxWidth()) {
                             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
                                 Text("Pemutar kelompok", fontWeight = FontWeight.SemiBold)
@@ -719,6 +740,7 @@ private fun SemalamScreen() {
                             isPaused = isPaused, progressMs = playbackPositionMs, durationMs = playbackDurationMs,
                             audioFile = store.clipFile(current.id, clip),
                             editable = current.status != "recording",
+                            audioAvailable = !current.audioDeleted && store.clipFile(current.id, clip).isFile,
                             onPlay = {
                                 if (playbackSession == current.id && playingClip == clip.id) togglePause()
                                 else playQueueAt(current.id, listOf(clip.id), 0)
@@ -733,9 +755,18 @@ private fun SemalamScreen() {
                         )
                     }
                     if (current.status != "recording") {
-                        OutlinedButton(onClick = { showDeleteSession = true }, modifier = Modifier.fillMaxWidth()) {
-                            Text("Hapus sesi dan seluruh cuplikan")
+                        if (!current.audioDeleted) {
+                            OutlinedButton(
+                                onClick = { showDeleteAudio = true },
+                                enabled = !deletionInProgress,
+                                modifier = Modifier.fillMaxWidth()
+                            ) { Text("Hapus audio saja (pertahankan laporan)") }
                         }
+                        OutlinedButton(
+                            onClick = { showDeleteSession = true },
+                            enabled = !deletionInProgress,
+                            modifier = Modifier.fillMaxWidth()
+                        ) { Text("Hapus seluruh sesi dan laporan") }
                     }
                 }
                 Spacer(Modifier.height(14.dp))
@@ -745,19 +776,57 @@ private fun SemalamScreen() {
                 )
             }
         }
+        if (showDeleteAudio && current != null) {
+            AlertDialog(
+                onDismissRequest = { if (!deletionInProgress) showDeleteAudio = false },
+                title = { Text("Hapus file audio saja?") },
+                text = { Text(
+                    "Semua WAV sesi ini akan dihapus permanen untuk mengosongkan ruang. Tanggal, durasi, kategori, jumlah cuplikan, kelompok kejadian, indeks aktivitas, dan grafik fluktuasi yang tersedia TETAP DISIMPAN. Audio tidak bisa diputar lagi."
+                ) },
+                confirmButton = { TextButton(
+                    enabled = !deletionInProgress,
+                    onClick = {
+                        val id = current.id
+                        stopPlayback()
+                        deletionInProgress = true
+                        scope.launch {
+                            val success = withContext(Dispatchers.IO) { store.removeSessionAudio(id) }
+                            statusText = if (success)
+                                "Audio sesi dihapus. Laporan, label, dan grafik dipertahankan."
+                            else "Penghapusan audio belum tuntas. Coba kembali; riwayat tetap tersimpan."
+                            deletionInProgress = false
+                            showDeleteAudio = false
+                            refresh()
+                        }
+                    }
+                ) { Text(if (deletionInProgress) "Menghapus…" else "Hapus audio saja") } },
+                dismissButton = { TextButton(enabled = !deletionInProgress,
+                    onClick = { showDeleteAudio = false }) { Text("Batal") } },
+            )
+        }
         if (showDeleteSession && current != null) {
             AlertDialog(
                 onDismissRequest = { showDeleteSession = false },
-                title = { Text("Hapus rekaman?") },
-                text = { Text("Seluruh cuplikan audio sesi ini akan dihapus dari perangkat. Tindakan tidak bisa dibatalkan.") },
-                confirmButton = { TextButton(onClick = {
-                    stopPlayback()
-                    statusText = if (store.removeSession(current.id)) "Sesi dan semua file audio dihapus."
-                    else "Penghapusan sesi gagal; periksa penyimpanan perangkat."
-                    showDeleteSession = false
-                    refresh()
-                }) { Text("Hapus permanen") } },
-                dismissButton = { TextButton(onClick = { showDeleteSession = false }) { Text("Batal") } },
+                title = { Text("Hapus seluruh sesi dan laporan?") },
+                text = { Text("Semua file audio, metadata, label, grafik dan riwayat sesi ini akan dihapus permanen. Pilih Hapus audio saja bila masih ingin menyimpan hasil analisis.") },
+                confirmButton = { TextButton(
+                    enabled = !deletionInProgress,
+                    onClick = {
+                        val id = current.id
+                        stopPlayback()
+                        deletionInProgress = true
+                        scope.launch {
+                            val success = withContext(Dispatchers.IO) { store.removeSession(id) }
+                            statusText = if (success) "Seluruh sesi, audio dan laporannya dihapus."
+                            else "Penghapusan sesi gagal; periksa penyimpanan perangkat."
+                            showDeleteSession = false
+                            deletionInProgress = false
+                            refresh()
+                        }
+                    }
+                ) { Text(if (deletionInProgress) "Menghapus…" else "Hapus semua permanen") } },
+                dismissButton = { TextButton(enabled = !deletionInProgress,
+                    onClick = { showDeleteSession = false }) { Text("Batal") } },
             )
         }
     }
@@ -773,6 +842,7 @@ private fun ClipCard(
     durationMs: Int,
     audioFile: File,
     editable: Boolean,
+    audioAvailable: Boolean,
     onPlay: () -> Unit,
     onLabel: (String) -> Unit,
     onDelete: () -> Unit,
@@ -788,7 +858,14 @@ private fun ClipCard(
                     style = MaterialTheme.typography.bodySmall, color = Color(0xFFBFCBE3))
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                OutlinedButton(onClick = onPlay) { Text(if (isPlaying && !isPaused) "⏸ Jeda" else if (isPlaying) "▶ Lanjut" else "▶ Putar") }
+                if (audioAvailable) {
+                    OutlinedButton(onClick = onPlay) {
+                        Text(if (isPlaying && !isPaused) "⏸ Jeda" else if (isPlaying) "▶ Lanjut" else "▶ Putar")
+                    }
+                } else {
+                    Text("Audio dihapus", style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFFBFCBE3))
+                }
                 androidx.compose.foundation.layout.Box {
                     TextButton(onClick = { showLabels = true }, enabled = editable) { Text("Label") }
                     DropdownMenu(expanded = showLabels, onDismissRequest = { showLabels = false }) {
@@ -797,7 +874,9 @@ private fun ClipCard(
                         }
                     }
                 }
-                TextButton(onClick = { confirmDelete = true }, enabled = editable) { Text("Hapus") }
+                if (audioAvailable) TextButton(
+                    onClick = { confirmDelete = true }, enabled = editable
+                ) { Text("Hapus") }
             }
         }
     }

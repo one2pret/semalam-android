@@ -17,6 +17,8 @@ internal data class SoundClip(
     val offsetMs: Long,
     val durationMs: Long,
     val label: String = "Belum dilabeli",
+    /** Sampled from WAV before audio-only deletion, for preserving the night review score. */
+    val sampledPeak: Float? = null,
 )
 
 internal data class SleepSession(
@@ -27,6 +29,8 @@ internal data class SleepSession(
     val status: String,
     val message: String,
     val clips: List<SoundClip>,
+    /** Audio WAV has been removed; clip history and derived graphs are preserved. */
+    val audioDeleted: Boolean = false,
 )
 
 internal data class StorageSummary(val bytes: Long, val sessions: Int, val clips: Int)
@@ -97,7 +101,7 @@ internal class SessionStore(context: Context) {
     fun removeClip(sessionId: String, clipId: String): Boolean {
         val old = get(sessionId) ?: return false
         // No edits to an active session: the recorder and UI own different store instances.
-        if (old.status == "recording" || RecorderStatus.isRecording && old.status == "recording") return false
+        if (old.status == "recording" || old.audioDeleted) return false
         val clip = old.clips.firstOrNull { it.id == clipId } ?: return false
         val audioFile = File(sessionDir(sessionId), clip.fileName)
         if (!audioFile.exists() || !audioFile.delete()) return false
@@ -109,10 +113,45 @@ internal class SessionStore(context: Context) {
         }
     }
 
+    /**
+     * Remove ONLY WAV files, keep JSON clip labels/times, sampled peaks and
+     * acoustic_levels.csv. Safe to retry after partial file deletion.
+     * Never runs against an active or still-finalizing recorder session.
+     */
+    @Synchronized
+    fun removeSessionAudio(id: String): Boolean {
+        val old = get(id) ?: return false
+        if (old.status == "recording" || RecorderStatus.isRecording && old.status == "recording") return false
+        val dir = sessionDir(id)
+        // Preserve sampled peaks in metadata BEFORE deleting any audio.
+        val annotated = old.copy(clips = old.clips.map { clip ->
+            if (clip.sampledPeak != null) clip
+            else {
+                val file = File(dir, clip.fileName)
+                val peak = WavWaveform.readPeaks(file, bars = 72).maxOrNull() ?: 0f
+                clip.copy(sampledPeak = peak)
+            }
+        })
+        try { write(annotated) } catch (_: Exception) { return false }
+
+        // Include orphaned WAV/temp files as well, but not metadata or acoustic CSV.
+        val audioFiles = dir.listFiles()?.filter {
+            it.isFile && (it.name.endsWith(".wav") || it.name.endsWith(".wav.tmp"))
+        } ?: return false
+        for (file in audioFiles) {
+            if (file.exists() && !file.delete()) return false
+        }
+        if (dir.listFiles()?.any { it.isFile && it.name.endsWith(".wav") } != false) return false
+        return try {
+            write(annotated.copy(audioDeleted = true))
+            true
+        } catch (_: Exception) { false }
+    }
+
     @Synchronized
     fun removeSession(id: String): Boolean {
         val old = get(id) ?: return false
-        if (old.status == "recording") return false
+        if (old.status == "recording" || RecorderStatus.isRecording && old.status == "recording") return false
         val folder = sessionDir(id)
         return folder.deleteRecursively() && !folder.exists()
     }
@@ -138,12 +177,19 @@ internal class SessionStore(context: Context) {
         val clipsArray = json.optJSONArray("clips") ?: JSONArray()
         val clips = (0 until clipsArray.length()).map { i ->
             val j = clipsArray.getJSONObject(i)
-            SoundClip(j.getString("id"), j.getString("fileName"), j.getLong("offsetMs"), j.getLong("durationMs"), j.optString("label", "Belum dilabeli"))
+            SoundClip(
+                j.getString("id"), j.getString("fileName"),
+                j.getLong("offsetMs"), j.getLong("durationMs"),
+                j.optString("label", "Belum dilabeli"),
+                if (j.has("sampledPeak") && !j.isNull("sampledPeak"))
+                    j.getDouble("sampledPeak").toFloat().coerceIn(0f, 1f) else null
+            )
         }
         SleepSession(
             json.getString("id"), json.getLong("startedMs"),
             if (json.isNull("finishedMs")) null else json.getLong("finishedMs"),
             json.getLong("lastHeartbeatMs"), json.getString("status"), json.optString("message", ""), clips,
+            json.optBoolean("audioDeleted", false),
         )
         }
     } catch (_: Exception) { null }
@@ -156,6 +202,7 @@ internal class SessionStore(context: Context) {
             put("lastHeartbeatMs", s.lastHeartbeatMs)
             put("status", s.status)
             put("message", s.message)
+            put("audioDeleted", s.audioDeleted)
             put("clips", JSONArray().also { array ->
                 s.clips.forEach { clip ->
                     array.put(JSONObject().apply {
@@ -164,6 +211,7 @@ internal class SessionStore(context: Context) {
                         put("offsetMs", clip.offsetMs)
                         put("durationMs", clip.durationMs)
                         put("label", clip.label)
+                        put("sampledPeak", clip.sampledPeak ?: JSONObject.NULL)
                     })
                 }
             })
